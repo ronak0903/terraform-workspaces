@@ -79,22 +79,3 @@ jobs:
           workspace: ${{ env.TF_WORKSPACE }}
           message: "Triggered from GitHub Actions (Commit: ${{ github.sha }} | Event: ${{ github.event_name }})"
           type: ${{ github.event.inputs.action == 'destroy' && 'destroy' || 'apply' }}
-
-      - name: Pipeline Summary
-        if: always()
-        run: |
-          echo "## Terraform Pipeline Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🏗️ Workspace | \`${{ env.TF_WORKSPACE }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔧 Init | \`${{ steps.init.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 📝 Format | \`${{ steps.fmt.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| ✅ Validate | \`${{ steps.validate.outcome || 'skipped' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🚀 HCP Run Trigger | \`${{ steps.tfe-run.outcome || 'skipped' }}\` |" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.tfe-run.outcome }}" = "success" ]; then
-            echo "| 🔗 Run Link | [View Run on HCP Terraform](${{ steps.tfe-run.outputs.run-url }}) |" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> **Note:** Apply and Destroy are managed exclusively through [HCP Terraform Cloud](https://app.terraform.io)." >> $GITHUB_STEP_SUMMARY
-          echo "> Click the **Run Link** above or go to your HCP portal to confirm and apply/destroy the planned changes." >> $GITHUB_STEP_SUMMARY

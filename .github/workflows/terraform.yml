@@ -144,13 +144,19 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
 
       - name: Send Slack Notification
-        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           RUN_URL: ${{ steps.tfe-run.outputs.run-url }}
           RUN_STATUS: ${{ steps.tfe-run.outcome }}
           WORKSPACE: ${{ env.TF_WORKSPACE }}
         run: |
+          # 0. Check if webhook is set
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "Slack Webhook URL is not configured. Skipping notification."
+            exit 0
+          fi
+
           # 1. Determine color and message based on status
           if [ "${{ job.status }}" = "success" ]; then
             if [ "${{ github.event_name }}" = "pull_request" ]; then

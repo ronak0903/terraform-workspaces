@@ -69,20 +69,16 @@ jobs:
         id: validate
         run: terraform validate -no-color
 
-      - name: Terraform Plan
-        if: github.event.inputs.action == 'plan' || github.event_name == 'push'
-        id: plan
-        run: terraform plan -no-color -input=false
-        continue-on-error: true
-
-      - name: Terraform Plan Status
-        if: steps.plan.outcome == 'failure'
-        run: exit 1
-
-      - name: Terraform Destroy Plan
-        if: github.event.inputs.action == 'destroy'
-        id: destroy-plan
-        run: terraform plan -destroy -no-color -input=false
+      - name: Trigger HCP Terraform Run (Plan / Destroy)
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'destroy' || github.event_name == 'push'
+        id: tfe-run
+        uses: kvrhdn/tfe-run@v1
+        with:
+          token: ${{ secrets.TF_API_TOKEN }}
+          organization: ronakHCP
+          workspace: ${{ env.TF_WORKSPACE }}
+          message: "Triggered from GitHub Actions (Commit: ${{ github.sha }} | Event: ${{ github.event_name }})"
+          type: ${{ github.event.inputs.action == 'destroy' && 'destroy' || 'apply' }}
 
       - name: Pipeline Summary
         if: always()
@@ -95,8 +91,10 @@ jobs:
           echo "| 🔧 Init | \`${{ steps.init.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| 📝 Format | \`${{ steps.fmt.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| ✅ Validate | \`${{ steps.validate.outcome || 'skipped' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 📋 Plan | \`${{ steps.plan.outcome || 'skipped' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 💥 Destroy Plan | \`${{ steps.destroy-plan.outcome || 'skipped' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🚀 HCP Run Trigger | \`${{ steps.tfe-run.outcome || 'skipped' }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.tfe-run.outcome }}" = "success" ]; then
+            echo "| 🔗 Run Link | [View Run on HCP Terraform](${{ steps.tfe-run.outputs.run-url }}) |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> **Note:** Apply and Destroy are managed exclusively through [HCP Terraform Cloud](https://app.terraform.io)." >> $GITHUB_STEP_SUMMARY
-          echo "> Go to your workspace to confirm and apply the planned changes." >> $GITHUB_STEP_SUMMARY
+          echo "> Click the **Run Link** above or go to your HCP portal to confirm and apply/destroy the planned changes." >> $GITHUB_STEP_SUMMARY

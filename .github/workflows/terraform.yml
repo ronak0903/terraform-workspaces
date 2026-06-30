@@ -1,17 +1,14 @@
 name: Terraform Cloud Pipeline
 
 on:
-
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - '**.tf'
       - '.github/workflows/terraform.yml'
 
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
       - '**.tf'
       - '.github/workflows/terraform.yml'
@@ -19,14 +16,14 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Select Environment"
+        description: "Environment"
         required: true
         type: choice
         options:
           - dev
           - stage
       action:
-        description: "Select Action"
+        description: "Action (apply = new infra, destroy = tear down infra)"
         required: true
         type: choice
         options:
@@ -34,12 +31,12 @@ on:
           - destroy
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JOB 1 — CI: Validate + Plan  (runs on push / pull_request only)
+# JOB 1 — CI  (auto on push / PR — validate + speculative plan)
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
-  terraform:
-    name: "Terraform (${{ matrix.environment }} - ${{ github.event_name == 'pull_request' && 'PR Plan' || 'Plan' }})"
+  ci:
+    name: "CI — ${{ matrix.environment }}"
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -49,37 +46,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: ["dev", "stage"]
+        environment: [dev, stage]
 
     env:
       TF_TOKEN_app_terraform_io: ${{ secrets.TF_API_TOKEN }}
       TF_WORKSPACE: aws-${{ matrix.environment }}
 
     steps:
+      - uses: actions/checkout@v4
 
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~> 1.5"
 
       - name: Terraform Init
-        id: init
         run: terraform init
 
       - name: Terraform Format Check
-        id: fmt
         run: terraform fmt -check -recursive
         continue-on-error: true
 
       - name: Terraform Validate
-        id: validate
         run: terraform validate -no-color
 
-      # Speculative plan on PR — does NOT apply, just shows the diff
-      - name: Trigger HCP Terraform Speculative Plan (PR)
+      - name: Speculative Plan (PR only)
         if: github.event_name == 'pull_request'
         id: tfe-pr
         uses: kvrhdn/tfe-run@v1
@@ -87,27 +77,13 @@ jobs:
           token: ${{ secrets.TF_API_TOKEN }}
           organization: ronakHCP
           workspace: ${{ env.TF_WORKSPACE }}
-          message: "Speculative Plan — PR #${{ github.event.number }} | ${{ github.sha }}"
+          message: "Speculative plan — PR #${{ github.event.number }}"
           type: apply
           speculative: true
           wait-for-completion: true
 
-      # Queue an apply run on push to main — you approve/discard in HCP UI
-      - name: Trigger HCP Terraform Apply Run (Push)
-        if: github.event_name == 'push'
-        id: tfe-push
-        uses: kvrhdn/tfe-run@v1
-        with:
-          token: ${{ secrets.TF_API_TOKEN }}
-          organization: ronakHCP
-          workspace: ${{ env.TF_WORKSPACE }}
-          message: "Auto-queued from push | Commit: ${{ github.sha }}"
-          type: apply
-          speculative: false
-          wait-for-completion: false
-
-      - name: Comment Plan Results on PR
-        if: github.event_name == 'pull_request' && always() && steps.tfe-pr.outcome == 'success'
+      - name: Comment Plan on PR
+        if: github.event_name == 'pull_request' && steps.tfe-pr.outcome == 'success'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
@@ -115,68 +91,41 @@ jobs:
           RUN_URL: ${{ steps.tfe-pr.outputs.run-url }}
           WORKSPACE: ${{ env.TF_WORKSPACE }}
         run: |
-          RUN_RESPONSE=$(curl -s \
-            --header "Authorization: Bearer $TF_API_TOKEN" \
-            --header "Content-Type: application/vnd.api+json" \
-            https://app.terraform.io/api/v2/runs/$RUN_ID)
+          PLAN_ID=$(curl -s -H "Authorization: Bearer $TF_API_TOKEN" \
+            https://app.terraform.io/api/v2/runs/$RUN_ID | jq -r '.data.relationships.plan.data.id')
 
-          PLAN_ID=$(echo "$RUN_RESPONSE" | jq -r '.data.relationships.plan.data.id')
-
-          PLAN_RESPONSE=$(curl -s \
-            --header "Authorization: Bearer $TF_API_TOKEN" \
-            --header "Content-Type: application/vnd.api+json" \
+          PLAN=$(curl -s -H "Authorization: Bearer $TF_API_TOKEN" \
             https://app.terraform.io/api/v2/plans/$PLAN_ID)
 
-          ADDITIONS=$(echo "$PLAN_RESPONSE"   | jq -r '.data.attributes."resource-additions"')
-          CHANGES=$(echo "$PLAN_RESPONSE"     | jq -r '.data.attributes."resource-changes"')
-          DESTRUCTIONS=$(echo "$PLAN_RESPONSE"| jq -r '.data.attributes."resource-destructions"')
+          ADD=$(echo "$PLAN" | jq -r '.data.attributes."resource-additions"')
+          CHG=$(echo "$PLAN" | jq -r '.data.attributes."resource-changes"')
+          DEL=$(echo "$PLAN" | jq -r '.data.attributes."resource-destructions"')
 
-          COMMENT_BODY="### 🤖 HCP Terraform Plan Results (\`${WORKSPACE}\`)
-
-          | Additions 🟢 | Changes 🟡 | Destructions 🔴 |
+          BODY="### 🤖 HCP Terraform Plan — \`${WORKSPACE}\`
+          | Add 🟢 | Change 🟡 | Destroy 🔴 |
           |:---:|:---:|:---:|
-          | **${ADDITIONS}** | **${CHANGES}** | **${DESTRUCTIONS}** |
-
-          🔗 [View Detailed Plan on HCP Terraform](${RUN_URL})"
+          | **${ADD}** | **${CHG}** | **${DEL}** |
+          🔗 [View Plan on HCP](${RUN_URL})"
 
           curl -s -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg body "$COMMENT_BODY" '{body: $body}')" \
+            -d "$(jq -n --arg b "$BODY" '{body:$b}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments"
 
-      - name: Slack Notification
-        if: always()
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-          RUN_URL: ${{ steps.tfe-pr.outputs.run-url || steps.tfe-push.outputs.run-url }}
-          WORKSPACE: ${{ env.TF_WORKSPACE }}
-        run: |
-          if [ -z "$SLACK_WEBHOOK" ]; then echo "No Slack webhook set, skipping."; exit 0; fi
-
-          if [ "${{ job.status }}" = "success" ]; then
-            [ "${{ github.event_name }}" = "pull_request" ] \
-              && COLOR="#2eb886" && STATUS_TEXT="🟢 Speculative Plan Completed" \
-              || COLOR="#e0a111" && STATUS_TEXT="🟡 Apply Run Queued (Approve in HCP)"
-          else
-            COLOR="#a30200"; STATUS_TEXT="🔴 Pipeline Failed"
-          fi
-
-          COMMIT_LINK="<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>"
-          MSG="*Workspace:* \`${WORKSPACE}\`\n*Event:* \`${{ github.event_name }}\` by ${{ github.actor }}\n*Commit:* ${COMMIT_LINK}"
-
-          [ -n "$RUN_URL" ] && BTN=",{\"type\":\"actions\",\"elements\":[{\"type\":\"button\",\"text\":{\"type\":\"plain_text\",\"text\":\"View Run on HCP\",\"emoji\":true},\"url\":\"${RUN_URL}\"}]}" || BTN=""
-
-          curl -s -X POST -H 'Content-type: application/json' --data \
-            "{\"attachments\":[{\"color\":\"${COLOR}\",\"blocks\":[{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"HCP Terraform: ${STATUS_TEXT}\",\"emoji\":true}},{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"${MSG}\"}}${BTN}]}]}" \
-            "$SLACK_WEBHOOK"
-
 # ─────────────────────────────────────────────────────────────────────────────
-# JOB 2 — Manual Apply / Destroy  (runs ONLY on workflow_dispatch)
+# JOB 2 — Manual Apply / Destroy
+#
+# HOW TO USE:
+#   GitHub → Actions tab → "Terraform Cloud Pipeline" → "Run workflow" button
+#   → pick environment (dev / stage) + action (apply / destroy) → Run
+#
+# apply   → queues an APPLY run on HCP workspace  → you approve in HCP UI
+# destroy → queues a DESTROY run on HCP workspace → you approve in HCP UI
 # ─────────────────────────────────────────────────────────────────────────────
 
   manual:
-    name: "🖐 Manual ${{ github.event.inputs.action == 'destroy' && '💣 DESTROY' || '✅ Apply' }} → aws-${{ github.event.inputs.environment }}"
+    name: "Manual ${{ github.event.inputs.action == 'destroy' && '💣 DESTROY' || '✅ Apply' }} → aws-${{ github.event.inputs.environment }}"
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
@@ -185,87 +134,32 @@ jobs:
       TF_WORKSPACE: aws-${{ github.event.inputs.environment }}
 
     steps:
+      - uses: actions/checkout@v4
 
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~> 1.5"
 
       - name: Terraform Init
-        id: init
         run: terraform init
 
       - name: Terraform Validate
-        id: validate
         run: terraform validate -no-color
 
-      # ── APPLY: Queue an apply run in HCP Terraform workspace.
-      #    Go to the workspace URL and click Apply / Discard.
-      - name: "✅ Trigger Apply Run in HCP Terraform Workspace"
-        if: github.event.inputs.action == 'apply'
-        id: tfe-apply
+      - name: Queue ${{ github.event.inputs.action }} run on HCP Terraform
+        id: tfe-run
         uses: kvrhdn/tfe-run@v1
         with:
           token: ${{ secrets.TF_API_TOKEN }}
           organization: ronakHCP
           workspace: ${{ env.TF_WORKSPACE }}
-          message: "Manual Apply — triggered by ${{ github.actor }}"
-          type: apply
+          message: "Manual ${{ github.event.inputs.action }} by ${{ github.actor }}"
+          type: ${{ github.event.inputs.action }}
           speculative: false
           wait-for-completion: false
 
-      # ── DESTROY: Queue a destroy run in HCP Terraform workspace.
-      #    Go to the workspace URL and click Apply / Discard to actually destroy.
-      - name: "💣 Trigger Destroy Run in HCP Terraform Workspace"
-        if: github.event.inputs.action == 'destroy'
-        id: tfe-destroy
-        uses: kvrhdn/tfe-run@v1
-        with:
-          token: ${{ secrets.TF_API_TOKEN }}
-          organization: ronakHCP
-          workspace: ${{ env.TF_WORKSPACE }}
-          message: "Manual DESTROY — triggered by ${{ github.actor }}"
-          type: destroy
-          speculative: false
-          wait-for-completion: false
-
-      - name: "🔗 Print Run URL"
-        if: always() && (steps.tfe-apply.outputs.run-url != '' || steps.tfe-destroy.outputs.run-url != '')
+      - name: Run URL
         run: |
-          RUN_URL="${{ steps.tfe-apply.outputs.run-url }}${{ steps.tfe-destroy.outputs.run-url }}"
-          echo "================================================"
-          echo " ${{ github.event.inputs.action }} run queued in HCP Terraform!"
-          echo " → Go here to Approve or Discard:"
-          echo "   ${RUN_URL}"
-          echo "================================================"
-
-      - name: Slack Notification
-        if: always()
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-          ACTION: ${{ github.event.inputs.action }}
-          WORKSPACE: ${{ env.TF_WORKSPACE }}
-          RUN_URL: ${{ steps.tfe-apply.outputs.run-url }}${{ steps.tfe-destroy.outputs.run-url }}
-        run: |
-          if [ -z "$SLACK_WEBHOOK" ]; then echo "No Slack webhook set, skipping."; exit 0; fi
-
-          if [ "${{ job.status }}" = "success" ]; then
-            if [ "$ACTION" = "destroy" ]; then
-              COLOR="#a30200"; STATUS_TEXT="💣 Destroy Run Queued — Approve in HCP Workspace"
-            else
-              COLOR="#e0a111"; STATUS_TEXT="🟡 Apply Run Queued — Approve in HCP Workspace"
-            fi
-          else
-            COLOR="#a30200"; STATUS_TEXT="🔴 Manual Action Failed"
-          fi
-
-          MSG="*Workspace:* \`${WORKSPACE}\`\n*Action:* \`${ACTION}\`\n*Triggered by:* ${{ github.actor }}"
-
-          [ -n "$RUN_URL" ] && BTN=",{\"type\":\"actions\",\"elements\":[{\"type\":\"button\",\"text\":{\"type\":\"plain_text\",\"text\":\"Approve / Discard on HCP\",\"emoji\":true},\"url\":\"${RUN_URL}\"}]}" || BTN=""
-
-          curl -s -X POST -H 'Content-type: application/json' --data \
-            "{\"attachments\":[{\"color\":\"${COLOR}\",\"blocks\":[{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"HCP Terraform: ${STATUS_TEXT}\",\"emoji\":true}},{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"${MSG}\"}}${BTN}]}]}" \
-            "$SLACK_WEBHOOK"
+          echo "HCP run queued:"
+          echo "${{ steps.tfe-run.outputs.run-url }}"
+          echo "Go to the URL above → approve to ${{ github.event.inputs.action }}"

@@ -45,13 +45,13 @@ on:
         type: boolean
 
       aws_account:
-        description: "AWS account"
+        description: "AWS account ID"
         required: true
         type: string
 
       port_run_id:
         description: "Port action run ID"
-        required: true
+        required: false
         type: string
 
 jobs:
@@ -66,29 +66,62 @@ jobs:
 
     steps:
 
+      # --------------------------------
+      # 1. Checkout
+      # --------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # --------------------------------
+      # 2. Authenticate to AWS using OIDC
+      # --------------------------------
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ inputs.region }}
+
+      # --------------------------------
+      # 3. Verify AWS authentication
+      # --------------------------------
+
+      - name: Verify AWS identity
+        run: |
+          echo "AWS Identity:"
+          aws sts get-caller-identity
+
+      # --------------------------------
+      # 4. Install Terraform
+      # --------------------------------
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
+      # --------------------------------
+      # 5. Terraform Init
+      # --------------------------------
+
       - name: Terraform Init
-        working-directory: terraform
-        run: terraform init
+        working-directory: .
+        run: |
+          terraform init
+
+      # --------------------------------
+      # 6. Terraform Apply
+      # --------------------------------
 
       - name: Terraform Apply
-        working-directory: terraform
         env:
           TF_VAR_bucket_name: ${{ inputs.bucket_name }}
           TF_VAR_region: ${{ inputs.region }}
+          TF_VAR_client: ${{ inputs.client }}
+          TF_VAR_environment: ${{ inputs.environment }}
+          TF_VAR_purpose: ${{ inputs.purpose }}
           TF_VAR_versioning: ${{ inputs.versioning }}
           TF_VAR_encryption: ${{ inputs.encryption }}
           TF_VAR_lifecycle_days: ${{ inputs.lifecycle_days }}
+
         run: |
           terraform apply -auto-approve

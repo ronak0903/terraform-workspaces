@@ -1,9 +1,27 @@
 variable "bucket_name" {
-  description = "Name of the S3 bucket"
-  type        = string
+  type = string
 }
 
-variable "environment" {
-  description = "Environment name (dev, stage)"
-  type        = string
+variable "region" {
+  type = string
+}
+
+variable "versioning" {
+  type    = bool
+  default = true
+}
+
+variable "encryption" {
+  type    = bool
+  default = true
+}
+
+variable "lifecycle_days" {
+  type    = number
+  default = 30
+}
+
+variable "tags" {
+  type    = map(string)
+  default = {}
 }
